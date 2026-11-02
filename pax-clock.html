@@ -85,6 +85,8 @@
 const CONFIG = {
   startTime: 10*3600 + 9*60 + 30,   // time on the face at curtain up (10:09:30)
   slowFactor: 0.4,                  // slow-mo ticks at 40% speed (60% slower): one tick every 2.5 s
+  tick: { normal: { time:0.22, bounce:0.9 },   // how each tick moves: time = seconds the second hand takes to travel one step,
+          slow:   { time:0.75, bounce:1.3 } }, // bounce = overshoot before settling (0 = none, 2 = springy). Longer time = smoother.
   rewindStart: 120,                 // rewind speed at the first instant, in clock-seconds per real second (slow enough to see the hour hand creep)
   rewindMax: 400000,                // top speed...
   rewindRamp: 60,                   // ...reached exactly this many seconds after the rewind starts (speed multiplies steadily, so every hand visibly accelerates)
@@ -178,12 +180,13 @@ function update(dt) {
   prevDisp = disp;
   if (paused) { gl = 0; return; }
   if (s === 'NORMAL' || s === 'PURPLE') {
-    const slow = s === 'PURPLE', P = slow ? 1 / CONFIG.slowFactor : 1, D = slow ? 0.32 : 0.08;
+    const slow = s === 'PURPLE', P = slow ? 1 / CONFIG.slowFactor : 1, tk = slow ? CONFIG.tick.slow : CONFIG.tick.normal;
     if (now >= nextTickAt) {
       sec++; tickAt = now; nextTickAt += P; if (nextTickAt < now) nextTickAt = now + P;
     }
-    const k = clamp((now - tickAt) / D, 0, 1), c = slow ? 2.2 : 1.4;   // ease-out with a little overshoot
-    disp = sec + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2);   // = sec - 1 at k=0, sec at k=1
+    // Ease in, swing past slightly, settle back. The smoothstep start means the hand never jumps on the first frame of a tick.
+    const k = clamp((now - tickAt) / tk.time, 0, 1), e = k * k * (3 - 2 * k), c = tk.bounce;
+    disp = sec + (c + 1) * Math.pow(e - 1, 3) + c * Math.pow(e - 1, 2);   // = sec - 1 at k=0, sec at k=1
     if (slow && now >= nextGlitch) {
       const G = CONFIG.glitch; glitchUntil = now + rand(...G.length); nextGlitch = glitchUntil + rand(...G.every);
     }
