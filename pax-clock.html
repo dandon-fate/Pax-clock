@@ -95,6 +95,7 @@ const CONFIG = {
             micro:0.07,             // chance per frame of a tiny glitch between bursts (0 = none)
             strength:1 },           // overall glitch strength: 0.5 = subtler, 1.5 = heavier
   warp: { amp:0.02, ramp:0.3 },     // blue freeze waviness: amp = peak sideways shift as a share of screen height, ramp = seconds to fade in/out
+  maxPixels: 1920 * 1080,           // render cap for the projector canvas. Retina/mirrored screens would otherwise draw 4x the pixels a 1080p projector can show
 };
 // Cue sheet. Edit `note` with your script lines or lighting cue numbers.
 const CUES = [
@@ -194,7 +195,7 @@ function update(dt) {
   if (s !== 'PURPLE') gl = 0;
   warpAmt += ((s === 'FREEZE' ? 1 : 0) - warpAmt) * (1 - Math.exp(-dt / (CONFIG.warp.ramp / 3)));
   const target = CONFIG.colors[s];
-  if (target) { const k = 1 - Math.exp(-dt / (CONFIG.colorFade / 3)); for (let i = 0; i < 3; i++) col[i] += (target[i] - col[i]) * k; }
+  if (target) { const k = 1 - Math.exp(-dt / (CONFIG.colorFade / 3)); for (let i = 0; i < 3; i++) { col[i] += (target[i] - col[i]) * k; if (Math.abs(target[i] - col[i]) < 1) col[i] = target[i]; } }   // snap at the end so the fade settles on a cached colour
 }
 
 // ===== Drawing =====
@@ -216,12 +217,20 @@ function getFace(w, h, rgb) {
     for (let i = 0; i < 60; i++) { const big = i % 5 === 0; g.lineWidth = R * (big ? 0.022 : 0.008); line(g, i / 60 * TAU, R * (big ? 0.82 : 0.89), R * 0.93); }
     faceBase.set(k, base);
   }
-  if (faceTint.size >= 6) faceTint.delete(faceTint.keys().next().value);
-  t = document.createElement('canvas'); t.width = w; t.height = h;
-  const g = t.getContext('2d'); g.drawImage(base, 0, 0);
+  // Only the fixed cue colours are cached. Mid-fade colours reuse one scratch canvas per size instead of allocating a full-screen canvas every frame.
+  const keep = Object.values(CONFIG.colors).concat([[40, 230, 255], [255, 40, 170]]).some(c => (c[0] | 0) === (rgb[0] | 0) && (c[1] | 0) === (rgb[1] | 0) && (c[2] | 0) === (rgb[2] | 0));
+  if (keep) {
+    if (faceTint.size >= 10) faceTint.delete(faceTint.keys().next().value);
+    t = document.createElement('canvas'); t.width = w; t.height = h; faceTint.set(tk, t);
+  } else {
+    t = faceScratch.get(k);
+    if (!t) { if (faceScratch.size >= 3) faceScratch.delete(faceScratch.keys().next().value); t = document.createElement('canvas'); t.width = w; t.height = h; faceScratch.set(k, t); }
+  }
+  const g = t.getContext('2d'); g.globalCompositeOperation = 'source-over'; g.clearRect(0, 0, w, h); g.drawImage(base, 0, 0);
   g.globalCompositeOperation = 'source-atop'; g.fillStyle = `rgb(${rgb[0] | 0},${rgb[1] | 0},${rgb[2] | 0})`; g.fillRect(0, 0, w, h);
-  faceTint.set(tk, t); return t;
+  return t;
 }
+const faceScratch = new Map();
 // Hand with a cheap glow: two wider, fainter strokes under the core (canvas shadowBlur is far too slow at projector size).
 function hand(g, a, r1, r2, lw) {
   const ga = g.globalAlpha;
@@ -252,14 +261,18 @@ function composite(t, black) {
   if (black) return;
   const u = Math.min(w, h) / 400, K = CONFIG.glitch.strength;
   if (warpAmt > 0.004) {                                        // metamorphopsia: straight lines bend. rows shift sideways, then columns shift up/down
-    const A = CONFIG.warp.amp * h * warpAmt, S = Math.max(2, Math.round(h / 270)), T = now;
+    const A = CONFIG.warp.amp * h * warpAmt, S = Math.max(3, Math.round(h / 220)), T = now;
+    // only slice the square around the clock: everything else is black, and slicing it cost most of the frame
+    const R = Math.min(w, h) * 0.42 * set.size, pad = R * 0.12 + A + S, cx = w / 2 + set.x * w, cy = h / 2 + set.y * h;
+    const x0 = Math.max(0, Math.floor((cx - R - pad) / S) * S), x1 = Math.min(w, cx + R + pad);
+    const y0 = Math.max(0, Math.floor((cy - R - pad) / S) * S), y1 = Math.min(h, cy + R + pad);
     wg.globalCompositeOperation = 'source-over'; wg.clearRect(0, 0, w, h);
-    for (let y = 0; y < h; y += S) {
+    for (let y = y0; y < y1; y += S) {
       const n = y / h, dx = A * (0.6 * Math.sin(n * 9 + T * 0.9) + 0.25 * Math.sin(n * 23 - T * 1.7)) * (0.55 + 0.45 * Math.sin(n * 3.1 + T * 0.5));
       wg.drawImage(off, 0, y, w, S, dx, y, w, S);
     }
     g.globalAlpha = set.bright;
-    for (let x = 0; x < w; x += S) {
+    for (let x = x0; x < x1; x += S) {
       const n = x / w, dy = A * (0.6 * Math.sin(n * 11 - T * 0.8) + 0.25 * Math.sin(n * 27 + T * 1.5)) * (0.55 + 0.45 * Math.sin(n * 2.7 - T * 0.6));
       g.drawImage(warp, x, 0, S, h, x, dy, S, h);
     }
@@ -286,7 +299,9 @@ function composite(t, black) {
   for (let y = (Math.random() * sl * 2) | 0; y < h; y += sl * 2) g.fillRect(0, y, w, sl);
 }
 function fit(t, dpr) {
-  const w = Math.round(t.canvas.clientWidth * dpr), h = Math.round(t.canvas.clientHeight * dpr);
+  const cw = t.canvas.clientWidth, ch = t.canvas.clientHeight;
+  const s = Math.min(dpr, Math.sqrt(CONFIG.maxPixels / Math.max(1, cw * ch)));   // never render more pixels than the cap; CSS stretches it to fill the screen
+  const w = Math.round(cw * s), h = Math.round(ch * s);
   if (w && h && (t.canvas.width !== w || t.canvas.height !== h)) {
     for (const c of [t.canvas, t.off, t.warp, t.cyan, t.mag]) { c.width = w; c.height = h; }
     t.w = w; t.h = h;
@@ -328,18 +343,26 @@ function render() {
   }
 }
 
-// ===== Loop: driven by the projector window when open, so it never stalls if the laptop window is covered =====
-let pending = false;
-function schedule() { if (pending) return; pending = true; ((popup && !popup.closed) ? popup : window).requestAnimationFrame(frame); }
+// ===== Loop =====
+// Both windows request animation frames and whichever arrives first draws. Browsers throttle a window they think is
+// covered or in the background (often the projector window while the laptop window has focus), so relying on one
+// window alone dropped the projector to a few frames a second. A 60 Hz timer backs both up.
+let lastFrame = 0, rafMain = false, rafPop = false;
+function schedule() {
+  if (!rafMain) { rafMain = true; requestAnimationFrame(() => { rafMain = false; tryFrame(); }); }
+  const p = popup && !popup.closed ? popup : null;
+  if (p && !rafPop) { rafPop = true; p.requestAnimationFrame(() => { rafPop = false; tryFrame(); }); }
+}
+function tryFrame() { if (performance.now() - lastFrame >= 10) frame(); schedule(); }   // ignore the second window's frame if one just drew
+setInterval(() => { if (performance.now() - lastFrame > 14) frame(); schedule(); }, 16);
 function frame() {
-  pending = false;
-  const real = performance.now() / 1000;
+  lastFrame = performance.now();
+  const real = lastFrame / 1000;
   if (paused) pausedAccum += real - lastReal;
   lastReal = real; now = real - pausedAccum;
   const dt = Math.min(0.1, now - last); last = now;
-  update(dt); render(); tickUi(); schedule();
+  update(dt); render(); tickUi();
 }
-setInterval(() => { if (performance.now() / 1000 - lastReal > 0.3) { pending = false; schedule(); } }, 250);
 
 // ===== Projector window =====
 function openProjector() {
@@ -350,7 +373,7 @@ function openProjector() {
   d.open();
   d.write('<!doctype html><meta charset="utf-8"><title>Pax Clock</title><style>html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:none}canvas{display:block;width:100vw;height:100vh}</style><canvas></canvas>');
   d.close();
-  proj = makeTarget(d.querySelector('canvas'));
+  proj = makeTarget(d.querySelector('canvas')); rafPop = false;   // a frame request on an old, closed window never fires
   const fs = () => d.fullscreenElement ? d.exitFullscreen() : d.documentElement.requestFullscreen().catch(() => {});
   d.addEventListener('keydown', e => { if (e.code === 'KeyF') fs(); else onKey(e); });
   d.addEventListener('dblclick', fs);
